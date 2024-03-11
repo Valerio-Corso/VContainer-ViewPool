@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Pool;
-using VContainer;
 using VContainer.Unity;
 
 namespace Project.Runtime.Core.Factory {
@@ -12,8 +11,8 @@ namespace Project.Runtime.Core.Factory {
     }
 
     public struct ViewPoolConfig {
-        public int InitialSize;
-        public string ViewPoolTransformName;
+        public readonly int InitialSize;
+        public readonly string ViewPoolTransformName;
 
         public ViewPoolConfig(int initialSize, string viewPoolTransformName) {
             InitialSize = initialSize;
@@ -29,14 +28,14 @@ namespace Project.Runtime.Core.Factory {
     }
     
     public class ViewPool<TView> : IViewPool<TView>, IPostInitializable where TView : MonoBehaviour, IViewPool {
-        [Inject] protected Func<Transform, TView> ViewFactory;
-        
         private readonly ViewPoolConfig _config;
+        private readonly Func<Transform, TView> _viewFactory;
         private readonly ObjectPool<TView> _viewPool;
         private readonly Transform _viewPoolTransform;
         
-        protected ViewPool(ViewPoolConfig config) {
+        protected ViewPool(ViewPoolConfig config, Func<Transform, TView> viewFactory) {
             _config = config;
+            _viewFactory = viewFactory;
             _viewPool = new ObjectPool<TView>(CreateView);
             var gameObject = new GameObject(ViewPoolName);
             _viewPoolTransform = gameObject.GetComponent<Transform>();
@@ -61,7 +60,7 @@ namespace Project.Runtime.Core.Factory {
         }
 
         public TView CreateView() { 
-            return ViewFactory.Invoke(_viewPoolTransform);
+            return _viewFactory.Invoke(_viewPoolTransform);
         }
         
         public TView Get(Transform transform = null) {
