@@ -1,18 +1,21 @@
-﻿{
+{
   "name": "com.valeriocorso.vcontainer-pool",
-  "version": "1.0.0",
   "displayName": "VContainer Pool",
-  "description": "A simple object pooling implementation for VContainer",
-  "unity": "2019.4",
-  "dependencies": {},
+  "version": "1.0.0",
+  "unity": "2018.4",
+  "type": "library",
   "keywords": [
     "vcontainer",
     "pool",
     "pooling"
   ],
+  "category": "Extensions",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Valerio-Corso/VContainer-ViewPool.git"
+  },
   "author": {
     "name": "Valerio Corso",
-    "email": "corso.valerio@gmail.com",
-    "url": "https://github.com/Valerio-Corso/VContainer-ViewPool"
+    "email": "-"
   }
 }
