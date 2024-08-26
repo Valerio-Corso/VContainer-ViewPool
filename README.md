@@ -3,9 +3,7 @@ A basic pool implementation that lets you easily register any Monobehavior as a 
 
 ## Usage
 ```
-[SerializeField] private StorageSlotView storageSlotView;
-public void Install(IContainerBuilder builder) {
-	builder.RegisterViewPoolFactory<StorageSlotView, ViewPool<StorageSlotView>>(storageSlotView, new ViewPoolConfig(5, "StorageSlotViewPool"), Lifetime.Singleton);
-}
+[SerializeField] private MinionAgentView minionView;
 
+builder.RegisterViewPoolFactory(storageSlotView, new ViewPoolConfig(5,"StorageSlotViewPool"), Lifetime.Singleton);
 ```
