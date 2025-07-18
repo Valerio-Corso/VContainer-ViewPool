@@ -1,100 +1,228 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Collections;
 using UnityEngine;
 using UnityEngine.Pool;
 using VContainer.Unity;
 
-namespace VContainer.ObjectPool {
+namespace BashoKit.Pooling {
     public interface IViewPool {
-        /// Called before returning the object to the pool, perfect place to reset to default state.
-        void Reset();
+        /// <summary>Called before returning the object to the pool—perfect place to reset state.</summary>
+        void OnReturn();
+
+        /// <summary>Called immediately after retrieving from the pool.</summary>
+        void OnRetrieve() { }
     }
 
-    public struct ViewPoolConfig {
-        public readonly int InitialSize;
-        public readonly string ViewPoolTransformName;
+    [Flags]
+    public enum PoolReleaseStrategy {
+        None = 0,
+        DisableObject = 1 << 0,
+        MoveOutOfBounds = 1 << 1,
+        ReparentToPool = 1 << 2,
+        
+        /// UI elements are usually disabled and reparented to the pool root
+        DefaultUIElement = DisableObject | ReparentToPool,
+        /// World entities are usually moved out of bounds and not disabled
+        DefaultWorldEntity = MoveOutOfBounds,
+    }
 
-        public ViewPoolConfig(int initialSize, string viewPoolTransformName) {
+    [Flags]
+    public enum PoolRetrieveStrategy {
+        None = 0,
+        ActivateObject = 1 << 0,
+        Reparent = 1 << 1,
+        MoveToCoord = 1 << 2,
+        
+        /// UI elements are usually enabled and reparented to the given transform
+        DefaultUIElement = ActivateObject | Reparent,
+        /// World entities are usually moved from out of bounds and not enabled as they are already active
+        DefaultWorldEntity = MoveToCoord,
+    }
+    
+    public struct ViewPoolConfig {
+        public int InitialSize { get; }
+        public string ViewPoolTransformName  { get; }
+        public PoolReleaseStrategy ReleaseStrategy  { get; }
+        public PoolRetrieveStrategy RetrieveStrategy  { get; }
+        public Vector3 OutOfBoundsOffset  { get; }
+
+        /// <summary>
+        /// Millisecond budget per frame for async prewarm, use 0 to disable prewarm.
+        /// </summary>
+        public float PrewarmBudgetMs  { get; }
+
+        public ViewPoolConfig(
+            int initialSize,
+            string viewPoolTransformName,
+            PoolReleaseStrategy releaseStrategy,
+            PoolRetrieveStrategy retrieveStrategy,
+            float prewarmBudgetMs = 5f,
+            Vector3? outOfBoundsOffset = null
+        ) {
             InitialSize = initialSize;
             ViewPoolTransformName = viewPoolTransformName;
+            ReleaseStrategy = releaseStrategy;
+            RetrieveStrategy = retrieveStrategy;
+            PrewarmBudgetMs = prewarmBudgetMs;
+            OutOfBoundsOffset = outOfBoundsOffset ?? new Vector3(1000f, 1000f, 1000f);
         }
     }
 
     public interface IViewPool<TView> where TView : IViewPool {
-        /// Optionally parent the object to the given transform
-        TView Get(Transform transform = null);
+        /// Retrieve a view with optional parent.
+        /// Behavior is controlled by RetrieveStrategy flags.
+        TView Get(Transform parent);
 
-        /// Release back to the pool
+        TView Get(Vector3 worldPosition);
+
+        /// <summary>Return one view to the pool.</summary>
         void Release(TView view);
+
+        /// <summary>Return multiple views to the pool.</summary>
+        void Release(IEnumerable<TView> views);
+
+        /// <summary>Pre-warm if configured for async.</summary>
+        void PostInitialize();
     }
 
-    public class ViewPool<TView> : IViewPool<TView>, IPostInitializable where TView : MonoBehaviour, IViewPool {
+    public class ViewPool<TView> : IViewPool<TView>, IPostInitializable
+        where TView : MonoBehaviour, IViewPool {
         private readonly ViewPoolConfig _config;
         private readonly Func<Transform, TView> _viewFactory;
         private readonly ObjectPool<TView> _viewPool;
-        private readonly Transform _viewPoolTransform;
+        private readonly Transform _poolRoot;
 
-        protected ViewPool(ViewPoolConfig config, Func<Transform, TView> viewFactory) {
+        public ViewPool(ViewPoolConfig config, Func<Transform, TView> viewFactory) {
             _config = config;
-            _viewFactory = viewFactory;
+            _viewFactory = viewFactory ?? throw new ArgumentNullException(nameof(viewFactory));
+            var go = new GameObject(_config.ViewPoolTransformName);
+            _poolRoot = go.transform;
 
-            var gameObject = new GameObject(ViewPoolName);
-            _viewPoolTransform = gameObject.GetComponent<Transform>();
-            _viewPool = new ObjectPool<TView>(CreateView, actionOnRelease: OnRelease, actionOnDestroy: OnDestroyObject, defaultCapacity: InitialSize);
+            _viewPool = new ObjectPool<TView>(
+                createFunc: CreateView,
+                actionOnRelease: OnRelease,
+                actionOnDestroy: OnDestroyPooledObject,
+                defaultCapacity: _config.InitialSize
+            );
         }
-
-        /// How many objects will be instantiated at startup.
-        private int InitialSize => _config.InitialSize;
-        private string ViewPoolName => _config.ViewPoolTransformName;
 
         public void PostInitialize() {
-            // Pre-warm the pool by creating and releasing initial objects
-            var tmpPool = ListPool<TView>.Get();
-            for (var i = 0; i < InitialSize; i++) {
-                var view = _viewPool.Get();
-                tmpPool.Add(view);
+            if (_config.PrewarmBudgetMs <= 0f) {
+                for (int i = 0; i < _config.InitialSize; i++) {
+                    var v = _viewPool.Get();
+                    _viewPool.Release(v);
+                }
             }
-            
-            foreach (var tmpItem in tmpPool) {
-                _viewPool.Release(tmpItem);
+            else {
+                CoroutineRunner.Instance.StartCoroutine(PrewarmCoroutine());
             }
-            
-            ListPool<TView>.Release(tmpPool);
         }
+
+
+        private IEnumerator PrewarmCoroutine()
+        {
+            var buffer = new TView[_config.InitialSize];
+            var spawned = 0;
+            var budgetSec = _config.PrewarmBudgetMs / 1000f;
+
+            while (spawned < _config.InitialSize)
+            {
+                var start = Time.realtimeSinceStartup;
+                while (spawned < _config.InitialSize && Time.realtimeSinceStartup - start < budgetSec) {
+                    buffer[spawned++] = Get(_config.OutOfBoundsOffset);
+                }
+                
+                yield return null; 
+            }
+
+            // release
+            yield return null;
+            for (int i = 0; i < spawned; i++)
+                _viewPool.Release(buffer[i]);
+        }
+
         
-        public TView Get(Transform transform = null) {
+        public TView Get(Transform parent = null) => InternalGet(parent, null);
+
+        public TView Get(Vector3 worldPosition) => InternalGet(null, worldPosition);
+
+        private TView InternalGet(Transform parent, Vector3? worldPosition) {
             var view = _viewPool.Get();
-            var viewTransform = view.transform;
-            if (transform != null) {
-                viewTransform.SetParent(transform, false);
+            var t = view.transform;
+
+            // Handle reparenting
+            if (_config.RetrieveStrategy.HasFlag(PoolRetrieveStrategy.Reparent)) {
+                t.SetParent(parent ?? _poolRoot, worldPositionStays: false);
+                t.localRotation = Quaternion.identity;
             }
             
-            viewTransform.localPosition = Vector3.zero;
-            viewTransform.localRotation = Quaternion.identity;
-            view.gameObject.SetActive(true);
+            if (_config.RetrieveStrategy.HasFlag(PoolRetrieveStrategy.MoveToCoord)) {
+                if (worldPosition.HasValue) t.position = worldPosition.Value;
+                t.localRotation = Quaternion.identity;
+            }
             
+            if (_config.RetrieveStrategy.HasFlag(PoolRetrieveStrategy.ActivateObject)) {
+                view.gameObject.SetActive(true);
+            }
+
+            view.OnRetrieve();
             return view;
         }
 
-        public virtual void Release(TView view) {
+        public void Release(TView view) {
+            if (view == null) throw new ArgumentNullException(nameof(view));
             _viewPool.Release(view);
         }
 
-        private TView CreateView() {
-            return _viewFactory.Invoke(_viewPoolTransform);
+        public void Release(IEnumerable<TView> views) {
+            if (views == null) throw new ArgumentNullException(nameof(views));
+            foreach (var v in views)
+                Release(v);
         }
+
+        private TView CreateView()
+            => _viewFactory(_poolRoot);
 
         private void OnRelease(TView view) {
-            // Reset the view's state and set inactive before returning to pool
-            view.gameObject.SetActive(false);
-            view.Reset();
-            var viewTransform = view.transform;
-            viewTransform.SetParent(_viewPoolTransform, false);
-            viewTransform.localPosition = Vector3.zero;
-            viewTransform.localRotation = Quaternion.identity;
+            view.OnReturn();
+            
+            var transform = view.transform;
+            if (_config.ReleaseStrategy.HasFlag(PoolReleaseStrategy.ReparentToPool)) {
+                transform.SetParent(_poolRoot, worldPositionStays: false);
+                transform.localRotation = Quaternion.identity;
+            }
+            
+            if (_config.ReleaseStrategy.HasFlag(PoolReleaseStrategy.DisableObject)) {
+                view.gameObject.SetActive(false);
+            }
+            
+            if (_config.ReleaseStrategy.HasFlag(PoolReleaseStrategy.MoveOutOfBounds)) {
+                transform.position = _config.OutOfBoundsOffset;
+            }
         }
 
-        private void OnDestroyObject(TView view) {
-            UnityEngine.Object.Destroy(view.gameObject);
+        private void OnDestroyPooledObject(TView view) {
+            if (view) UnityEngine.Object.Destroy(view.gameObject);
+        }
+    }
+
+    /// <summary>
+    /// Helper MonoBehaviour to run coroutines for non-MonoBehaviour classes.
+    /// </summary>
+    public class CoroutineRunner : MonoBehaviour {
+        private static CoroutineRunner _instance;
+
+        public static CoroutineRunner Instance {
+            get {
+                if (_instance == null) {
+                    var go = new GameObject("ViewPool.CoroutineRunner");
+                    DontDestroyOnLoad(go);
+                    _instance = go.AddComponent<CoroutineRunner>();
+                }
+
+                return _instance;
+            }
         }
     }
 }
